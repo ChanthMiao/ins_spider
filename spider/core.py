@@ -5,7 +5,7 @@ import pprint
 import random
 import re
 from types import FunctionType
-from typing import List, Mapping, Optional, Type, NamedTuple
+from typing import List, Mapping, NamedTuple, Optional
 
 import aiohttp
 import coloredlogs
@@ -24,6 +24,25 @@ default_headers = {
     "cache-Control": "no-cache",
     "Accept-Language": "en-US,en;q=0.8"
 }
+
+
+async def search(keywords: List[str],
+                 proxy: Optional[str] = None) -> List[str]:
+    rt = []
+    async with aiohttp.ClientSession(headers=default_headers) as clt:
+        rank_token = str(random.random())
+        for key in keywords:
+            search_query = "context=blended&query=\'{0}\'&rank_token=\'{1}\'&include_reel=true".format(
+                key, rank_token)
+            async with clt.get(instagramIndex + '/web/search/topsearch/?' +
+                               search_query,
+                               proxy=proxy) as resp:
+                search_json = await resp.json()
+                userlist = search_json['users']
+                for node in userlist:
+                    if node['user']['is_private'] is False:
+                        rt.append(node['user']['username'])
+    return rt
 
 
 class AccountProfile(NamedTuple):
@@ -56,9 +75,9 @@ class Spider(object):
                  session: Optional[aiohttp.ClientSession] = None,
                  headers: Optional[Mapping[str, str]] = default_headers,
                  proxy: Optional[str] = None,
-                 spi_logger: Type[logging.Logger] = None) -> None:
-        if spi_logger is not None:
-            self.__spi_logger = spi_logger
+                 haslog: bool = True) -> None:
+        if haslog is False:
+            self.__spi_logger = None
         else:
             self.__spi_logger = logging.getLogger('spider')
         coloredlogs.install(level='INFO',
@@ -75,7 +94,7 @@ class Spider(object):
         else:
             self.__headers = {}
         self.__proxy = proxy
-        if self.__proxy is not None:
+        if self.__proxy is not None and self.__spi_logger is not None:
             self.__spi_logger.info(
                 'spider for user \'{0}\' sets http(s) proxy \'{1}\''.format(
                     self.__username, self.__proxy))
@@ -124,9 +143,10 @@ class Spider(object):
                 self.__headers[k] = v
         if self.__headers.get("User-Agent") is None:
             await self._fresh_ua(kind=ua_code, cust_ua_str=cust_ua)
-        self.__spi_logger.info(
-            'spider for user \'{0}\' updates http headers\n\'{1}\''.format(
-                self.__username, pprint.pformat(self.__headers)))
+        if self.__spi_logger is not None:
+            self.__spi_logger.info(
+                'spider for user \'{0}\' updates http headers\n\'{1}\''.format(
+                    self.__username, pprint.pformat(self.__headers)))
 
     async def _load_js_flags(self, userIndex: str) -> None:
         clc_js_uri = self.__patterns['clc_js'].search(userIndex).group()
@@ -166,15 +186,16 @@ class Spider(object):
                               node["node"]["edge_media_to_comment"]["count"],
                               node["node"]["display_url"], self.__profile.id)
                 current_page_posts.append(tmp)
-                self.__spi_logger.info(
-                    'new posts record of user \'{0}\' loaded:\n{1}'.format(
-                        self.__username, tmp))
-            else:
+                if self.__spi_logger is not None:
+                    self.__spi_logger.info(
+                        'new posts record of user \'{0}\' loaded:\n{1}'.format(
+                            self.__username, tmp))
+            elif self.__spi_logger is not None:
                 self.__spi_logger.info("post {0} is video, skip it".format(
                     node["node"]["id"]))
         self.__post_list.extend(current_page_posts)
         if self.__hook2 is not None:
-            self.__hook2(current_page_posts)
+            self.__hook2(current_page_posts, self)
 
     async def load_user_index(self) -> int:
         async with self.__session.get(
@@ -183,8 +204,9 @@ class Spider(object):
                 headers=self.__headers) as user_index_resp:
             if user_index_resp.status == 404:
                 await user_index_resp.text()
-                self.__spi_logger.warning(
-                    'user \'{0} does not exist.\''.format(self.__username))
+                if self.__spi_logger is not None:
+                    self.__spi_logger.warning(
+                        'user \'{0} does not exist.\''.format(self.__username))
                 return 404
             user_index = await user_index_resp.text()
             await self._load_js_flags(user_index)
@@ -194,8 +216,9 @@ class Spider(object):
             is_private: bool = config["entry_data"]["ProfilePage"][0][
                 "graphql"]["user"]["is_private"]
             if is_private:
-                self.__spi_logger.warning('user \'{0} is private.\''.format(
-                    self.__username))
+                if self.__spi_logger is not None:
+                    self.__spi_logger.warning(
+                        'user \'{0} is private.\''.format(self.__username))
                 return 503
             self.__profile = AccountProfile(
                 config["entry_data"]["ProfilePage"][0]["graphql"]["user"]
@@ -215,10 +238,11 @@ class Spider(object):
                     "page_info"]["end_cursor"]
             self.__curr_page = config["entry_data"]["ProfilePage"][0][
                 "graphql"]["user"]["edge_owner_to_timeline_media"]["edges"]
-            self.__spi_logger.info('new user profile loaded:\n{}'.format(
-                self.__profile))
+            if self.__spi_logger is not None:
+                self.__spi_logger.info('new user profile loaded:\n{}'.format(
+                    self.__profile))
             if self.__hook1 is not None:
-                self.__hook1(self.__profile)
+                self.__hook1(self.__profile, self)
             self.load_current_posts()
             return 200
 
@@ -238,15 +262,16 @@ class Spider(object):
             self.__curr_page = next_page_json["data"]["user"][
                 "edge_owner_to_timeline_media"]["edges"]
             self.load_current_posts()
-            self.__spi_logger.info(
-                'user \'{0}\' switched to the next page.'.format(
-                    self.__username))
+            if self.__spi_logger is not None:
+                self.__spi_logger.info(
+                    'user \'{0}\' switched to the next page.'.format(
+                        self.__username))
 
     async def next_page(self) -> None:
         if self.__flags['has_next_page'] is True:
             await self._next_page()
             self.pop_headers(['X_Request_With'])
-        else:
+        elif self.__spi_logger is not None:
             self.__spi_logger.warning(
                 'user \'{0}\', no next page available!'.format(
                     self.__username))
@@ -256,11 +281,12 @@ class Spider(object):
             await asyncio.sleep(random.random() * 5)
             await self._next_page()
         self.pop_headers(['X_Request_With'])
-        self.__spi_logger.info(
-            'No next page available, all posts of user \'{0}\' loaded!'.format(
-                self.__username))
+        if self.__spi_logger is not None:
+            self.__spi_logger.info(
+                'No next page available, all posts of user \'{0}\' loaded!'.
+                format(self.__username))
         if self.__hook3 is not None:
-            self.__hook3(self.__profile, self.__post_list)
+            self.__hook3(self.__profile, self.__post_list, self)
 
     def get_report(self) -> OneUser:
         return OneUser(self.__profile, self.__post_list)
@@ -273,10 +299,10 @@ class Spider(object):
         if rt_code == 200:
             await self.all_pages()
 
-    def get_progress(self):
+    def get_progress(self) -> float:
         return len(self.__post_list) / self.__profile.posts
 
-    def json(self):
+    def json(self) -> dict:
         def post_to_dict(p: OnePost):
             tmp = dict(p._asdict())
             tmp.pop('uid')
@@ -291,7 +317,7 @@ class Spider(object):
     def set_hooks(self,
                   after_profile: Optional[FunctionType] = None,
                   after_one_page: Optional[FunctionType] = None,
-                  after_all: Optional[FunctionType] = None):
+                  after_all: Optional[FunctionType] = None) -> None:
         self.__hook1 = after_profile
         self.__hook2 = after_one_page
         self.__hook3 = after_all
