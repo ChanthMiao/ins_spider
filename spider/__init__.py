@@ -9,11 +9,11 @@
 >>> import aiohttp
 >>> import uvloop
 >>> import json
->>> from spider import single
+>>> from spider import core
 >>> # 定义一个异步方法。
 >>> async def run(username: str, proxy: str=None):
 >>>         async with aiohttp.ClientSession() as session:
->>>             sample = single.single(username=username,
+>>>             sample = core.Spider(username=username,
 >>>                                    session=session,
 >>>                                    proxy=proxy)
 >>>             await sample.run()
@@ -31,7 +31,7 @@
 ====================
 >>> #定义一个并发调用。
 >>> async def wrap_run():
->>>     #条件允许的情况下，我建议为每一个`single`实例提供不同的代理。
+>>>     #条件允许的情况下，我建议为每一个`Spider`实例提供不同的代理。
 >>>     await asyncio.gather(run('instagram', 'http://localhost:8080'), run('test', 'http://localhost:8081'))
 >>> # 注册loop
 >>> uvloop.install()

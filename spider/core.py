@@ -4,7 +4,8 @@ import logging
 import pprint
 import random
 import re
-from typing import List, Mapping, Optional, Type
+from types import FunctionType
+from typing import List, Mapping, Optional, Type, NamedTuple
 
 import aiohttp
 import coloredlogs
@@ -25,7 +26,31 @@ default_headers = {
 }
 
 
-class single(object):
+class AccountProfile(NamedTuple):
+    id: str = '-1'
+    username: str = ''
+    posts: int = -1
+    following: int = -1
+    follower: int = -1
+    biography: str = ''
+
+
+class OnePost(NamedTuple):
+    id: str = '-1'
+    shortcode: str = ''
+    timestamp: int = -1
+    stars: int = -1
+    comments: int = -1
+    url: str = ''
+    uid: str = '-1'
+
+
+class OneUser(NamedTuple):
+    user: AccountProfile
+    edges: List[OnePost] = []
+
+
+class Spider(object):
     def __init__(self,
                  username: Optional[str] = None,
                  session: Optional[aiohttp.ClientSession] = None,
@@ -57,37 +82,48 @@ class single(object):
         self.__patterns = default_pattern
         self.__flags = {'has_next_page': False}
         self.__curr_page: list = []
-        self.__data: dict = {'edges': []}
+        self.__profile: AccountProfile = None
+        self.__post_list: List[OnePost] = []
+        self.__hook1: Optional[FunctionType] = None
+        self.__hook2: Optional[FunctionType] = None
+        self.__hook3: Optional[FunctionType] = None
 
-    async def _fresh_ua(self, kind: int = 0) -> None:
-        ua_page = "http://useragentstring.com/pages/useragentstring.php?name={}"
-        param: str
-        if kind == 0:
-            param = "Chrome"
-        elif kind == 1:
-            param = "Firefox"
-        elif kind == 2:
-            param = "Edge"
+    async def _fresh_ua(self,
+                        kind: Optional[int] = None,
+                        cust_ua_str: Optional[str] = None) -> None:
+        if cust_ua_str is not None:
+            self.__headers["User-Agent"] = cust_ua_str
         else:
-            param = "Chrome"
-        async with self.__session.get(ua_page.format(param),
-                                      proxy=self.__proxy) as resp:
-            body = await resp.text()
-            pat_block = r'<h4>(.*?)</h4>(.*?)</li>'
-            pat = r"<a\s+href\s*\=\s*'/index\.php\?id=\d+'.*?>(.*?)</a>"
-            ua_block = re.search(pat_block, body).groups()
-            ua_list = re.findall(pat, ua_block[1])
-            if self.__headers is None:
-                self.__headers = {}
-            self.__headers["User-Agent"] = ua_list[0]
+            ua_page = "http://useragentstring.com/pages/useragentstring.php?name={0}"
+            param: str
+            if kind is None or kind == 0:
+                param = "Chrome"
+            elif kind == 1:
+                param = "Firefox"
+            elif kind == 2:
+                param = "Edge"
+            else:
+                param = "Chrome"
+            async with self.__session.get(ua_page.format(param),
+                                          proxy=self.__proxy) as resp:
+                body = await resp.text()
+                pat_block = r'<h4>(.*?)</h4>(.*?)</li>'
+                pat = r"<a\s+href\s*\=\s*'/index\.php\?id=\d+'.*?>(.*?)</a>"
+                ua_block = re.search(pat_block, body).groups()
+                ua_list = re.findall(pat, ua_block[1])
+                if self.__headers is None:
+                    self.__headers = {}
+                self.__headers["User-Agent"] = ua_list[0]
 
-    async def fake_headers(self, headers: dict = None,
-                           ua_code: int = 0) -> None:
+    async def fake_headers(self,
+                           headers: Optional[dict] = None,
+                           ua_code: Optional[int] = None,
+                           cust_ua: Optional[str] = None) -> None:
         if headers is not None:
             for k, v in headers.items:
                 self.__headers[k] = v
         if self.__headers.get("User-Agent") is None:
-            await self._fresh_ua(ua_code)
+            await self._fresh_ua(kind=ua_code, cust_ua_str=cust_ua)
         self.__spi_logger.info(
             'spider for user \'{0}\' updates http headers\n\'{1}\''.format(
                 self.__username, pprint.pformat(self.__headers)))
@@ -121,25 +157,24 @@ class single(object):
             self.__headers.pop(key)
 
     def load_current_posts(self):
+        current_page_posts = []
         for node in self.__curr_page:
-            # TODO output
-            pic_id = node["node"]["id"]
-            pic_time_stamp = node["node"]["taken_at_timestamp"]
-            pic_stars = node["node"]["edge_media_preview_like"]["count"]
-            pic_comments = node["node"]["edge_media_to_comment"]["count"]
-            pic_url = node["node"]["display_url"]
-            new_record = {
-                'id': pic_id,
-                'time_stamp': pic_time_stamp,
-                'stars': pic_stars,
-                'comments': pic_comments,
-                'url': pic_url
-            }
-            self.__data['edges'].append(new_record)
-            readable_record = pprint.pformat(new_record)
-            self.__spi_logger.info(
-                'new posts record of user \'{0}\' loaded:\n{1}'.format(
-                    self.__username, readable_record))
+            if node["node"]["is_video"] is False:
+                tmp = OnePost(node["node"]["id"], node["node"]["shortcode"],
+                              node["node"]["taken_at_timestamp"],
+                              node["node"]["edge_media_preview_like"]["count"],
+                              node["node"]["edge_media_to_comment"]["count"],
+                              node["node"]["display_url"], self.__profile.id)
+                current_page_posts.append(tmp)
+                self.__spi_logger.info(
+                    'new posts record of user \'{0}\' loaded:\n{1}'.format(
+                        self.__username, tmp))
+            else:
+                self.__spi_logger.info("post {0} is video, skip it".format(
+                    node["node"]["id"]))
+        self.__post_list.extend(current_page_posts)
+        if self.__hook2 is not None:
+            self.__hook2(current_page_posts)
 
     async def load_user_index(self) -> int:
         async with self.__session.get(
@@ -148,24 +183,29 @@ class single(object):
                 headers=self.__headers) as user_index_resp:
             if user_index_resp.status == 404:
                 await user_index_resp.text()
-                self.__spi_logger.error('user \'{0} does not exist.\''.format(
-                    self.__username))
+                self.__spi_logger.warning(
+                    'user \'{0} does not exist.\''.format(self.__username))
                 return 404
             user_index = await user_index_resp.text()
             await self._load_js_flags(user_index)
             sharedData = self.__patterns["shardData"].search(
                 user_index).groups()[0]
             config = json.loads(sharedData, encoding='utf-8')
-            self.__data['id'] = config["entry_data"]["ProfilePage"][0][
-                "graphql"]["user"]["id"]
-            self.__data['posts'] = config["entry_data"]["ProfilePage"][0][
-                "graphql"]["user"]["edge_owner_to_timeline_media"]["count"]
-            self.__data['following'] = config["entry_data"]["ProfilePage"][0][
-                "graphql"]["user"]["edge_follow"]["count"]
-            self.__data['followers'] = config["entry_data"]["ProfilePage"][0][
-                "graphql"]["user"]["edge_followed_by"]["count"]
-            self.__data['biography'] = config["entry_data"]["ProfilePage"][0][
-                "graphql"]["user"]["biography"]
+            is_private: bool = config["entry_data"]["ProfilePage"][0][
+                "graphql"]["user"]["is_private"]
+            if is_private:
+                self.__spi_logger.warning('user \'{0} is private.\''.format(
+                    self.__username))
+                return 503
+            self.__profile = AccountProfile(
+                config["entry_data"]["ProfilePage"][0]["graphql"]["user"]
+                ["id"], self.__username, config["entry_data"]["ProfilePage"][0]
+                ["graphql"]["user"]["edge_owner_to_timeline_media"]["count"],
+                config["entry_data"]["ProfilePage"][0]["graphql"]["user"]
+                ["edge_follow"]["count"], config["entry_data"]["ProfilePage"]
+                [0]["graphql"]["user"]["edge_followed_by"]["count"],
+                config["entry_data"]["ProfilePage"][0]["graphql"]["user"]
+                ["biography"])
             self.__flags['has_next_page'] = config["entry_data"][
                 "ProfilePage"][0]["graphql"]["user"][
                     "edge_owner_to_timeline_media"]["page_info"][
@@ -175,16 +215,17 @@ class single(object):
                     "page_info"]["end_cursor"]
             self.__curr_page = config["entry_data"]["ProfilePage"][0][
                 "graphql"]["user"]["edge_owner_to_timeline_media"]["edges"]
-            readable_record = pprint.pformat(self.__data)
-            self.__spi_logger.info(
-                'new user profile loaded:\n{}'.format(readable_record))
+            self.__spi_logger.info('new user profile loaded:\n{}'.format(
+                self.__profile))
+            if self.__hook1 is not None:
+                self.__hook1(self.__profile)
             self.load_current_posts()
             return 200
 
     async def _next_page(self) -> None:
         self.merge_headers({'X_Request_With': "XMLHttpRequest"})
         query_url = instagramIndex + '/graphql/query/?query_hash={0}&variables={{"id":"{1}","first":12,"after":"{2}"}}'.format(
-            self.__flags['queryId'], self.__data['id'],
+            self.__flags['queryId'], self.__profile.id,
             self.__flags['end_curr'])
         async with self.__session.get(
                 query_url, proxy=self.__proxy,
@@ -212,18 +253,45 @@ class single(object):
 
     async def all_pages(self) -> None:
         while self.__flags['has_next_page'] is True:
-            await asyncio.sleep(random.random() * 3)
+            await asyncio.sleep(random.random() * 5)
             await self._next_page()
         self.pop_headers(['X_Request_With'])
         self.__spi_logger.info(
             'No next page available, all posts of user \'{0}\' loaded!'.format(
                 self.__username))
+        if self.__hook3 is not None:
+            self.__hook3(self.__profile, self.__post_list)
 
-    def get_report(self) -> dict:
-        return self.__data
+    def get_report(self) -> OneUser:
+        return OneUser(self.__profile, self.__post_list)
 
-    async def run(self) -> None:
-        await self.fake_headers()
+    async def run(self,
+                  ua_code: Optional[int] = None,
+                  cust_ua_str: Optional[str] = None) -> None:
+        await self.fake_headers(ua_code=ua_code, cust_ua=cust_ua_str)
         rt_code = await self.load_user_index()
         if rt_code == 200:
             await self.all_pages()
+
+    def get_progress(self):
+        return len(self.__post_list) / self.__profile.posts
+
+    def json(self):
+        def post_to_dict(p: OnePost):
+            tmp = dict(p._asdict())
+            tmp.pop('uid')
+            return tmp
+
+        data = {'profile': None, 'edges': []}
+        data['profile'] = dict(self.__profile._asdict())
+        for post in map(post_to_dict, self.__post_list):
+            data['edges'].append(post)
+        return data
+
+    def set_hooks(self,
+                  after_profile: Optional[FunctionType] = None,
+                  after_one_page: Optional[FunctionType] = None,
+                  after_all: Optional[FunctionType] = None):
+        self.__hook1 = after_profile
+        self.__hook2 = after_one_page
+        self.__hook3 = after_all
