@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import pprint
 import random
 import re
 from types import FunctionType
@@ -24,6 +23,7 @@ default_headers = {
     "cache-Control": "no-cache",
     "Accept-Language": "en-US,en;q=0.8"
 }
+cacahed_flags = {}
 
 
 async def search(keywords: List[str],
@@ -85,7 +85,7 @@ class Spider(object):
                             fmt="[%(levelname)s] %(asctime)s  %(message)s")
         if username is None:
             raise RuntimeError('username can not be None')
-        self.__username = username
+        self.username = username
         if session is None:
             raise RuntimeError("session can not be None")
         self.__session = session
@@ -97,9 +97,9 @@ class Spider(object):
         if self.__proxy is not None and self.__spi_logger is not None:
             self.__spi_logger.info(
                 'spider for user \'{0}\' sets http(s) proxy \'{1}\''.format(
-                    self.__username, self.__proxy))
+                    self.username, self.__proxy))
         self.__patterns = default_pattern
-        self.__flags = {'has_next_page': False}
+        self.__flags = {'has_next_page': False, 'loaded': -1}
         self.__curr_page: list = []
         self.__profile: AccountProfile = None
         self.__post_list: List[OnePost] = []
@@ -146,23 +146,33 @@ class Spider(object):
         if self.__spi_logger is not None:
             self.__spi_logger.info(
                 'spider for user \'{0}\' updates http headers\n\'{1}\''.format(
-                    self.__username, pprint.pformat(self.__headers)))
+                    self.username, self.__headers))
 
     async def _load_js_flags(self, userIndex: str) -> None:
-        clc_js_uri = self.__patterns['clc_js'].search(userIndex).group()
-        async with self.__session.get(instagramIndex + clc_js_uri,
-                                      proxy=self.__proxy,
-                                      headers=self.__headers) as clc_js_resp:
-            clc_js = await clc_js_resp.text()
-            self.__flags['X_IG_APP_ID'] = self.__patterns[
-                'X_IG_APP_ID'].search(clc_js).groups()[0]
-        ppc_js_uri = self.__patterns['ppc_js'].search(userIndex).group()
-        async with self.__session.get(instagramIndex + ppc_js_uri,
-                                      proxy=self.__proxy,
-                                      headers=self.__headers) as ppc_js_resp:
-            ppc_js = await ppc_js_resp.text()
-            self.__flags['queryId'] = self.__patterns['queryId'].search(
-                ppc_js).groups()[0]
+        if cacahed_flags.get('X_IG_APP_ID') is not None:
+            self.__flags['X_IG_APP_ID'] = cacahed_flags['X_IG_APP_ID']
+        else:
+            clc_js_uri = self.__patterns['clc_js'].search(userIndex).group()
+            async with self.__session.get(
+                    instagramIndex + clc_js_uri,
+                    proxy=self.__proxy,
+                    headers=self.__headers) as clc_js_resp:
+                clc_js = await clc_js_resp.text()
+                self.__flags['X_IG_APP_ID'] = self.__patterns[
+                    'X_IG_APP_ID'].search(clc_js).groups()[0]
+            cacahed_flags['X_IG_APP_ID'] = self.__flags['X_IG_APP_ID']
+        if cacahed_flags.get('queryId') is not None:
+            self.__flags['queryId'] = cacahed_flags['queryId']
+        else:
+            ppc_js_uri = self.__patterns['ppc_js'].search(userIndex).group()
+            async with self.__session.get(
+                    instagramIndex + ppc_js_uri,
+                    proxy=self.__proxy,
+                    headers=self.__headers) as ppc_js_resp:
+                ppc_js = await ppc_js_resp.text()
+                self.__flags['queryId'] = self.__patterns['queryId'].search(
+                    ppc_js).groups()[0]
+            cacahed_flags['queryId'] = self.__flags['queryId']
 
     def get_headers(self) -> Optional[Mapping[str, str]]:
         return self.__headers
@@ -174,7 +184,8 @@ class Spider(object):
 
     def pop_headers(self, keys: List[str]) -> None:
         for key in keys:
-            self.__headers.pop(key)
+            if self.__headers.get(key) is not None:
+                self.__headers.pop(key)
 
     def load_current_posts(self):
         current_page_posts = []
@@ -189,27 +200,30 @@ class Spider(object):
                 if self.__spi_logger is not None:
                     self.__spi_logger.info(
                         'new posts record of user \'{0}\' loaded:\n{1}'.format(
-                            self.__username, tmp))
+                            self.username, tmp))
             elif self.__spi_logger is not None:
                 self.__spi_logger.info("post {0} is video, skip it".format(
                     node["node"]["id"]))
+            self.__flags['loaded'] += 1
         self.__post_list.extend(current_page_posts)
         if self.__hook2 is not None:
             self.__hook2(current_page_posts, self)
 
     async def load_user_index(self) -> int:
         async with self.__session.get(
-                instagramIndex + "/" + self.__username,
+                instagramIndex + "/" + self.username,
                 proxy=self.__proxy,
                 headers=self.__headers) as user_index_resp:
             if user_index_resp.status == 404:
                 await user_index_resp.text()
                 if self.__spi_logger is not None:
                     self.__spi_logger.warning(
-                        'user \'{0} does not exist.\''.format(self.__username))
+                        'user \'{0} does not exist.\''.format(self.username))
                 return 404
             user_index = await user_index_resp.text()
-            await self._load_js_flags(user_index)
+            if self.__flags.get('X_IG_APP_ID') is None or self.__flags.get(
+                    'queryId') is None:
+                await self._load_js_flags(user_index)
             sharedData = self.__patterns["shardData"].search(
                 user_index).groups()[0]
             config = json.loads(sharedData, encoding='utf-8')
@@ -218,11 +232,11 @@ class Spider(object):
             if is_private:
                 if self.__spi_logger is not None:
                     self.__spi_logger.warning(
-                        'user \'{0} is private.\''.format(self.__username))
+                        'user \'{0} is private.\''.format(self.username))
                 return 503
             self.__profile = AccountProfile(
                 config["entry_data"]["ProfilePage"][0]["graphql"]["user"]
-                ["id"], self.__username, config["entry_data"]["ProfilePage"][0]
+                ["id"], self.username, config["entry_data"]["ProfilePage"][0]
                 ["graphql"]["user"]["edge_owner_to_timeline_media"]["count"],
                 config["entry_data"]["ProfilePage"][0]["graphql"]["user"]
                 ["edge_follow"]["count"], config["entry_data"]["ProfilePage"]
@@ -236,6 +250,7 @@ class Spider(object):
             self.__flags['end_curr'] = config["entry_data"]["ProfilePage"][0][
                 "graphql"]["user"]["edge_owner_to_timeline_media"][
                     "page_info"]["end_cursor"]
+            self.__flags['loaded'] = 0
             self.__curr_page = config["entry_data"]["ProfilePage"][0][
                 "graphql"]["user"]["edge_owner_to_timeline_media"]["edges"]
             if self.__spi_logger is not None:
@@ -255,17 +270,26 @@ class Spider(object):
                 query_url, proxy=self.__proxy,
                 headers=self.__headers) as next_page_resp:
             next_page_json = await next_page_resp.json()
-            self.__flags['has_next_page'] = next_page_json['data']['user'][
-                "edge_owner_to_timeline_media"]["page_info"]["has_next_page"]
-            self.__flags['end_curr'] = next_page_json["data"]["user"][
-                "edge_owner_to_timeline_media"]["page_info"]["end_cursor"]
-            self.__curr_page = next_page_json["data"]["user"][
-                "edge_owner_to_timeline_media"]["edges"]
-            self.load_current_posts()
-            if self.__spi_logger is not None:
-                self.__spi_logger.info(
-                    'user \'{0}\' switched to the next page.'.format(
-                        self.__username))
+            if next_page_json['status'] == 'ok':
+                self.__flags['has_next_page'] = next_page_json['data']['user'][
+                    "edge_owner_to_timeline_media"]["page_info"][
+                        "has_next_page"]
+                self.__flags['end_curr'] = next_page_json["data"]["user"][
+                    "edge_owner_to_timeline_media"]["page_info"]["end_cursor"]
+                self.__curr_page = next_page_json["data"]["user"][
+                    "edge_owner_to_timeline_media"]["edges"]
+                self.load_current_posts()
+                if self.__spi_logger is not None:
+                    self.__spi_logger.info(
+                        'user \'{0}\' switched to the next page.'.format(
+                            self.username))
+            else:
+                if self.__spi_logger is not None:
+                    sleeptime = random.randint(10, 16)
+                    self.__spi_logger.warning(
+                        'user \'{0}\' failed to load current page, try again {1} secs later.'
+                        .format(self.username, sleeptime))
+                    await asyncio.sleep(sleeptime)
 
     async def next_page(self) -> None:
         if self.__flags['has_next_page'] is True:
@@ -273,18 +297,17 @@ class Spider(object):
             self.pop_headers(['X_Request_With'])
         elif self.__spi_logger is not None:
             self.__spi_logger.warning(
-                'user \'{0}\', no next page available!'.format(
-                    self.__username))
+                'user \'{0}\', no next page available!'.format(self.username))
 
     async def all_pages(self) -> None:
         while self.__flags['has_next_page'] is True:
-            await asyncio.sleep(random.random() * 5)
+            await asyncio.sleep(random.random() * 9)
             await self._next_page()
         self.pop_headers(['X_Request_With'])
         if self.__spi_logger is not None:
             self.__spi_logger.info(
                 'No next page available, all posts of user \'{0}\' loaded!'.
-                format(self.__username))
+                format(self.username))
         if self.__hook3 is not None:
             self.__hook3(self.__profile, self.__post_list, self)
 
@@ -300,7 +323,7 @@ class Spider(object):
             await self.all_pages()
 
     def get_progress(self) -> float:
-        return len(self.__post_list) / self.__profile.posts
+        return self.__flags['loaded'] / self.__profile.posts
 
     def json(self) -> dict:
         def post_to_dict(p: OnePost):
