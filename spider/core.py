@@ -4,7 +4,7 @@ import logging
 import random
 import re
 from types import FunctionType
-from typing import List, Mapping, NamedTuple, Optional
+from typing import List, Mapping, NamedTuple, Optional, Type
 
 import aiohttp
 import coloredlogs
@@ -28,6 +28,9 @@ cacahed_flags = {}
 
 async def search(keywords: List[str],
                  proxy: Optional[str] = None) -> List[str]:
+    '''
+    按给定关键字列表搜索可用的公开账户。
+    '''
     rt = []
     async with aiohttp.ClientSession(headers=default_headers) as clt:
         rank_token = str(random.random())
@@ -71,11 +74,14 @@ class OneUser(NamedTuple):
 
 class Spider(object):
     def __init__(self,
-                 username: Optional[str] = None,
-                 session: Optional[aiohttp.ClientSession] = None,
+                 username: Type[str],
+                 session: Type[aiohttp.ClientSession],
                  headers: Optional[Mapping[str, str]] = default_headers,
                  proxy: Optional[str] = None,
                  haslog: bool = True) -> None:
+        '''
+        构建一个爬虫实例。请至少提供账户名和ClientSession实例。
+        '''
         if haslog is False:
             self.__spi_logger = None
         else:
@@ -187,7 +193,12 @@ class Spider(object):
             if self.__headers.get(key) is not None:
                 self.__headers.pop(key)
 
-    def load_current_posts(self):
+    async def _load_current_posts(self):
+        '''
+        加载当前页面的所有图片帖信息至已爬取帖子列表。\n
+        支持在加载完成后执行账户自定义钩子函数。\n
+        警告：不建议显示调用
+        '''
         current_page_posts = []
         for node in self.__curr_page:
             if node["node"]["is_video"] is False:
@@ -207,9 +218,14 @@ class Spider(object):
             self.__flags['loaded'] += 1
         self.__post_list.extend(current_page_posts)
         if self.__hook2 is not None:
-            self.__hook2(current_page_posts, self)
+            await self.__hook2(current_page_posts, self)
 
     async def load_user_index(self) -> int:
+        '''
+        加载账户基本信息，并为爬取帖子做好准备（挂载代采集的当前页面数据）。\n
+        支持在成功加载后执行账户自定义钩子函数。\n
+        返回值：404-账户不存在；503-账户不可见；200-成功。
+        '''
         async with self.__session.get(
                 instagramIndex + "/" + self.username,
                 proxy=self.__proxy,
@@ -257,11 +273,15 @@ class Spider(object):
                 self.__spi_logger.info('new user profile loaded:\n{}'.format(
                     self.__profile))
             if self.__hook1 is not None:
-                self.__hook1(self.__profile, self)
-            self.load_current_posts()
+                await self.__hook1(self.__profile, self)
+            await self._load_current_posts()
             return 200
 
     async def _next_page(self) -> None:
+        '''
+        翻页（instagram网页采用了惰性加载），挂载下一页帖子数据。\n
+        内部方法，不建议显示调用，且不应当在load_user_index前被调用。
+        '''
         self.merge_headers({'X_Request_With': "XMLHttpRequest"})
         query_url = instagramIndex + '/graphql/query/?query_hash={0}&variables={{"id":"{1}","first":12,"after":"{2}"}}'.format(
             self.__flags['queryId'], self.__profile.id,
@@ -278,7 +298,7 @@ class Spider(object):
                     "edge_owner_to_timeline_media"]["page_info"]["end_cursor"]
                 self.__curr_page = next_page_json["data"]["user"][
                     "edge_owner_to_timeline_media"]["edges"]
-                self.load_current_posts()
+                await self._load_current_posts()
                 if self.__spi_logger is not None:
                     self.__spi_logger.info(
                         'user \'{0}\' switched to the next page.'.format(
@@ -292,6 +312,10 @@ class Spider(object):
                     await asyncio.sleep(sleeptime)
 
     async def next_page(self) -> None:
+        '''
+        爬取下一页帖子信息，不应当在load_user_index之前被调用。\n
+        由于此方法调用了_load_current_posts，故支持执行钩子函数。
+        '''
         if self.__flags['has_next_page'] is True:
             await self._next_page()
             self.pop_headers(['X_Request_With'])
@@ -300,6 +324,10 @@ class Spider(object):
                 'user \'{0}\', no next page available!'.format(self.username))
 
     async def all_pages(self) -> None:
+        '''
+        爬取账户所有图片贴信息，不应当在load_user_index之前被调用。\n
+        支持执行账户自定义钩子函数。
+        '''
         while self.__flags['has_next_page'] is True:
             await asyncio.sleep(random.random() * 9)
             await self._next_page()
@@ -309,23 +337,36 @@ class Spider(object):
                 'No next page available, all posts of user \'{0}\' loaded!'.
                 format(self.username))
         if self.__hook3 is not None:
-            self.__hook3(self.__profile, self.__post_list, self)
+            await self.__hook3(self.__profile, self.__post_list, self)
 
     def get_report(self) -> OneUser:
+        '''
+        获取当前目标账户的数据报告，OneUser类型。
+        '''
         return OneUser(self.__profile, self.__post_list)
 
     async def run(self,
                   ua_code: Optional[int] = None,
                   cust_ua_str: Optional[str] = None) -> None:
+        '''
+        自动爬取给定账户的所有信息。
+        '''
         await self.fake_headers(ua_code=ua_code, cust_ua=cust_ua_str)
         rt_code = await self.load_user_index()
         if rt_code == 200:
             await self.all_pages()
 
     def get_progress(self) -> float:
+        '''
+        获取当前账户爬取进度。
+        '''
         return self.__flags['loaded'] / self.__profile.posts
 
     def json(self) -> dict:
+        '''
+        以json格式（实际为dict）输出当前用户完整数据。
+        '''
+
         def post_to_dict(p: OnePost):
             tmp = dict(p._asdict())
             tmp.pop('uid')
@@ -341,6 +382,13 @@ class Spider(object):
                   after_profile: Optional[FunctionType] = None,
                   after_one_page: Optional[FunctionType] = None,
                   after_all: Optional[FunctionType] = None) -> None:
+        '''
+        设置自定义钩子函数，3处执行位置可选。\n
+        钩子返回值无意义，建议返回None。\n
+        after_profile接收2个参数：AccountProfile类型的用户基本信息和指向实例的指针；\n
+        after_one_page接收2个参数：List[OnePost]类型当前页面帖子信息和指向实例的指针；\n
+        after_all接收3个参数：AccountProfile类型的用户基本信息、List[OnePost]类型当前页面帖子信息和指向实例的指针。\n
+        '''
         self.__hook1 = after_profile
         self.__hook2 = after_one_page
         self.__hook3 = after_all

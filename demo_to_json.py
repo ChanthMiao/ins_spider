@@ -19,7 +19,7 @@ def keyboardInterrupHandler(signalk, frame):
     exit(0)
 
 
-def progressBar(p: OnePost, ptr: core.Spider):
+async def progressBar(p: OnePost, ptr: core.Spider):
     # 作为钩子函数传入，提供针对当前用户的爬取进度显示。
     print('progress of current target %s %.2f%%' %
           (ptr.username, ptr.get_progress() * 100))
